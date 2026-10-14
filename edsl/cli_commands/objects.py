@@ -142,23 +142,57 @@ def register(app: click.Group) -> None:
     @click.option("--description", default=None, help="Object description.")
     @click.option("--visibility", default=None, help="private, public, or unlisted.")
     @click.option("--force", is_flag=True, default=False, help="Patch an existing alias conflict when creating.")
-    def push_object(object_path, alias, description, visibility, force):
+    @click.option("--as-filestore", is_flag=True, default=False, help="Publish the file as an EDSL FileStore.")
+    def push_object(object_path, alias, description, visibility, force, as_filestore):
         """Push or patch an EDSL object on Expected Parrot.
 
-        OBJECT_PATH is a git-backed .ep package, or a .json/.json.gz file for
-        objects that have no package format, such as prompts.
+        OBJECT_PATH is a git-backed .ep package, a .json/.json.gz file for
+        objects that have no package format (such as prompts), or a raw file
+        (HTML, PDF, PNG, CSV, DOCX, etc.) which is published as a FileStore.
+
+        Examples:
+          ep push survey.ep --alias my-survey
+          ep push writeup/report.html --alias color-preference-report --description "Study report" --visibility unlisted
+          ep push --as-filestore data.csv --visibility private
+
+        Pushing without --alias creates a new object each time. Pushing with an
+        existing alias creates an alias conflict unless --force is supplied to patch
+        the existing object associated with that alias.
         """
         source_path = Path(object_path)
         try:
+            if visibility is not None and visibility not in ("public", "unlisted", "private"):
+                error(
+                    "VALIDATION_ERROR",
+                    f"Invalid visibility: {visibility}. Must be 'public', 'unlisted', or 'private'.",
+                    suggestion="Use --visibility public, --visibility unlisted, or --visibility private.",
+                    exit_code=EXIT_VALIDATION,
+                )
+
+            if as_filestore:
+                if not source_path.is_file():
+                    error(
+                        "USAGE_ERROR",
+                        f"--as-filestore requires a regular file: {object_path}",
+                        suggestion="Provide a path to a regular file (e.g., report.html, data.csv).",
+                        exit_code=EXIT_USAGE,
+                    )
+                _push_filestore(source_path, alias, description, visibility, force)
+                return
+
             if source_path.is_file() and source_path.name.endswith((".json", ".json.gz")):
                 _push_json_object(source_path, alias, description, visibility, force)
+                return
+
+            if source_path.is_file() and source_path.suffix != ".ep":
+                _push_filestore(source_path, alias, description, visibility, force)
                 return
 
             if not (source_path.is_dir() or source_path.suffix == ".ep"):
                 error(
                     "USAGE_ERROR",
-                    f"Push requires a git-backed .ep package or a .json file: {object_path}",
-                    suggestion="Save the object as a .ep package (or .json for prompts), then run 'ep push <path>'.",
+                    f"Push requires a git-backed .ep package, a .json file, or a raw file: {object_path}",
+                    suggestion="Save the object as a .ep package (or .json for prompts), or provide a raw file path.",
                     exit_code=EXIT_USAGE,
                 )
 
@@ -228,6 +262,49 @@ def register(app: click.Group) -> None:
         output(
             {
                 "object_type": type(obj).__name__,
+                "source": str(source_path),
+                "operation": "push",
+                "coop_info": jsonable(info),
+            }
+        )
+
+
+    def _push_filestore(source_path: Path, alias, description, visibility, force):
+        """Wrap a raw file in a FileStore and push it to Expected Parrot."""
+        from edsl import FileStore
+
+        try:
+            fs = FileStore(str(source_path))
+        except Exception as e:
+            error(
+                "FILESTORE_ERROR",
+                f"Could not create FileStore from {source_path}: {e}",
+                suggestion="Ensure the file exists, is readable, and is not corrupted.",
+                exit_code=EXIT_VALIDATION,
+            )
+
+        push_kwargs = {"description": description, "alias": alias, "force": force}
+        if visibility is not None:
+            push_kwargs["visibility"] = visibility
+
+        try:
+            info = fs.push(**push_kwargs)
+        except Exception as e:
+            err_str = str(e)
+            if "413" in err_str or "too large" in err_str.lower():
+                suggestion = "The server rejected the upload because the file is too large."
+            else:
+                suggestion = "Check your Expected Parrot API key, network connection, or platform limits."
+            error(
+                "PUSH_ERROR",
+                err_str,
+                suggestion=suggestion,
+                exit_code=EXIT_REMOTE,
+            )
+
+        output(
+            {
+                "object_type": "FileStore",
                 "source": str(source_path),
                 "operation": "push",
                 "coop_info": jsonable(info),

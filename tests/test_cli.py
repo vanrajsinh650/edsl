@@ -7697,6 +7697,374 @@ class TestPush:
         assert out["status"] == "error"
         assert out["error"]["code"] == "USAGE_ERROR"
 
+    def test_push_raw_file_html(self, tmp_path, monkeypatch):
+        from edsl import FileStore
+
+        html_file = tmp_path / "report.html"
+        html_file.write_text("<html><body><h1>Test Report</h1></body></html>", encoding="utf-8")
+
+        push_calls = []
+
+        def fake_push(self, description=None, alias=None, visibility="private", expected_parrot_url=None, force=False):
+            push_calls.append(
+                {
+                    "description": description,
+                    "alias": alias,
+                    "visibility": visibility,
+                    "force": force,
+                }
+            )
+            return {
+                "uuid": "created-html-uuid",
+                "url": "https://www.expectedparrot.com/content/created-html-uuid",
+                "alias": alias,
+                "alias_url": f"https://www.expectedparrot.com/content/alice/{alias}" if alias else None,
+                "description": description,
+                "visibility": visibility,
+            }
+
+        monkeypatch.setattr(FileStore, "push", fake_push)
+
+        result = CliRunner().invoke(
+            cli_module.app,
+            [
+                "push",
+                str(html_file),
+                "--alias",
+                "color-report",
+                "--description",
+                "Color preference report",
+                "--visibility",
+                "unlisted",
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        out = json.loads(result.output)
+        assert out["status"] == "ok"
+        assert out["data"]["operation"] == "push"
+        assert out["data"]["object_type"] == "FileStore"
+        assert out["data"]["source"] == str(html_file)
+        assert out["data"]["coop_info"]["uuid"] == "created-html-uuid"
+        assert out["data"]["coop_info"]["alias"] == "color-report"
+        assert out["data"]["coop_info"]["description"] == "Color preference report"
+        assert out["data"]["coop_info"]["visibility"] == "unlisted"
+        assert push_calls == [
+            {
+                "description": "Color preference report",
+                "alias": "color-report",
+                "visibility": "unlisted",
+                "force": False,
+            }
+        ]
+
+    def test_push_raw_file_fixtures_all_formats(self, tmp_path, monkeypatch):
+        """Test HTML, PDF, PNG, CSV, and DOCX formats preserving bytes and metadata."""
+        from edsl import FileStore
+
+        fixtures = {
+            "report.html": b"<!DOCTYPE html><html><body>Report</body></html>",
+            "document.pdf": b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF",
+            "image.png": b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\rIDATx\x9cc`\x00\x00\x00\x02\x00\x01H\xaf\xa4q\x00\x00\x00\x00IEND\xaeB`\x82",
+            "data.csv": b"name,score\nalice,100\nbob,90\n",
+            "file.docx": b"PK\x03\x04\x14\x00\x00\x00\x08\x00fake_docx_content",
+        }
+
+        stored_objects = {}
+
+        def fake_push(self, description=None, alias=None, visibility="private", expected_parrot_url=None, force=False):
+            uuid = f"uuid-{self.suffix}"
+            stored_objects[uuid] = self.to_dict()
+            return {
+                "uuid": uuid,
+                "url": f"https://www.expectedparrot.com/content/{uuid}",
+                "alias": alias,
+                "alias_url": f"https://www.expectedparrot.com/content/alice/{alias}" if alias else None,
+                "description": description,
+                "visibility": visibility,
+            }
+
+        monkeypatch.setattr(FileStore, "push", fake_push)
+
+        expected_mime_types = {
+            "report.html": "text/html",
+            "document.pdf": "application/pdf",
+            "image.png": "image/png",
+            "data.csv": "text/csv",
+            "file.docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        }
+
+        for filename, content_bytes in fixtures.items():
+            file_path = tmp_path / filename
+            file_path.write_bytes(content_bytes)
+
+            result = CliRunner().invoke(
+                cli_module.app,
+                [
+                    "push",
+                    str(file_path),
+                    "--alias",
+                    f"alias-{filename.replace('.', '-')}",
+                    "--description",
+                    f"Description for {filename}",
+                    "--visibility",
+                    "unlisted",
+                ],
+            )
+
+            assert result.exit_code == 0, f"Failed for {filename}: {result.output}"
+            out = json.loads(result.output)
+            assert out["status"] == "ok"
+            assert out["data"]["object_type"] == "FileStore"
+            uuid = out["data"]["coop_info"]["uuid"]
+            assert uuid in stored_objects
+
+            # Verify pulling/reconstructing preserves original bytes, filename, suffix, and MIME metadata
+            pulled_fs = FileStore.from_dict(stored_objects[uuid])
+            with pulled_fs.open() as f:
+                data = f.read()
+                if isinstance(data, str):
+                    data = data.encode("utf-8")
+                assert data == content_bytes, f"Content mismatch for {filename}"
+            expected_suffix = filename.split(".")[-1]
+            assert pulled_fs.suffix == expected_suffix
+            assert pulled_fs.mime_type == expected_mime_types[filename]
+            # Verify original filename is preserved in the path property
+            assert Path(pulled_fs.path).name == filename
+
+    def test_push_missing_path_error(self, tmp_path):
+        """A missing file path produces Click's EXIT_USAGE exit code and error message."""
+        missing = tmp_path / "nonexistent.html"
+        result = CliRunner().invoke(cli_module.app, ["push", str(missing)])
+        assert result.exit_code == cli_module.EXIT_USAGE
+        assert "does not exist" in result.output
+
+    def test_push_raw_file_with_as_filestore_flag(self, tmp_path, monkeypatch):
+        from edsl import FileStore
+
+        csv_file = tmp_path / "items.csv"
+        csv_file.write_text("a,b\n1,2\n", encoding="utf-8")
+
+        monkeypatch.setattr(
+            FileStore,
+            "push",
+            lambda self, **kwargs: {
+                "uuid": "csv-uuid",
+                "url": "https://www.expectedparrot.com/content/csv-uuid",
+                "alias": kwargs.get("alias"),
+                "visibility": kwargs.get("visibility", "private"),
+            },
+        )
+
+        result = CliRunner().invoke(
+            cli_module.app,
+            ["push", "--as-filestore", str(csv_file), "--alias", "my-csv"],
+        )
+        assert result.exit_code == 0, result.output
+        out = json.loads(result.output)
+        assert out["data"]["object_type"] == "FileStore"
+
+        # Verify --as-filestore rejects directories
+        dir_result = CliRunner().invoke(
+            cli_module.app,
+            ["push", "--as-filestore", str(tmp_path)],
+        )
+        assert dir_result.exit_code == cli_module.EXIT_USAGE
+        dir_out = json.loads(dir_result.output)
+        assert dir_out["error"]["code"] == "USAGE_ERROR"
+
+    def test_push_raw_file_invalid_visibility(self, tmp_path):
+        test_file = tmp_path / "notes.txt"
+        test_file.write_text("hello", encoding="utf-8")
+
+        result = CliRunner().invoke(
+            cli_module.app,
+            ["push", str(test_file), "--visibility", "super_secret"],
+        )
+        assert result.exit_code == cli_module.EXIT_VALIDATION
+        out = json.loads(result.output)
+        assert out["status"] == "error"
+        assert out["error"]["code"] == "VALIDATION_ERROR"
+        assert "super_secret" in out["error"]["message"]
+
+    def test_push_raw_file_unreadable_file_error(self, tmp_path, monkeypatch):
+        from edsl import FileStore
+
+        test_file = tmp_path / "corrupted.bin"
+        test_file.write_bytes(b"\x00\x01\x02")
+
+        def broken_init(self, *args, **kwargs):
+            raise ValueError("Corrupted file header")
+
+        monkeypatch.setattr(FileStore, "__init__", broken_init)
+
+        result = CliRunner().invoke(
+            cli_module.app,
+            ["push", str(test_file)],
+        )
+        assert result.exit_code == cli_module.EXIT_VALIDATION
+        out = json.loads(result.output)
+        assert out["status"] == "error"
+        assert out["error"]["code"] == "FILESTORE_ERROR"
+        assert "Corrupted file header" in out["error"]["message"]
+
+    def test_push_directory_without_package_error(self, tmp_path):
+        empty_dir = tmp_path / "not_a_package"
+        empty_dir.mkdir()
+
+        result = CliRunner().invoke(
+            cli_module.app,
+            ["push", str(empty_dir)],
+        )
+        assert result.exit_code == cli_module.EXIT_USAGE
+        out = json.loads(result.output)
+        assert out["status"] == "error"
+        assert out["error"]["code"] == "INVALID_PACKAGE"
+
+    def test_push_help_includes_filestore_example(self):
+        result = CliRunner().invoke(cli_module.app, ["push", "--help"])
+        assert result.exit_code == 0
+        assert "FileStore" in result.output
+        assert "report.html" in result.output
+
+    def test_push_raw_file_alias_conflict_without_force_errors(self, tmp_path, monkeypatch):
+        """Alias conflict without --force must produce a non-zero exit and PUSH_ERROR."""
+        from edsl import FileStore
+
+        html_file = tmp_path / "report.html"
+        html_file.write_text("<html>report</html>", encoding="utf-8")
+
+        def fake_push_conflict(self, description=None, alias=None, visibility="private",
+                               expected_parrot_url=None, force=False):
+            if not force:
+                raise RuntimeError(
+                    "You already have an object with the alias 'weekly-report'"
+                )
+            return {"uuid": "ok-uuid", "url": "...", "alias": alias, "visibility": visibility}
+
+        monkeypatch.setattr(FileStore, "push", fake_push_conflict)
+
+        result = CliRunner().invoke(
+            cli_module.app,
+            ["push", str(html_file), "--alias", "weekly-report", "--visibility", "unlisted"],
+        )
+        assert result.exit_code == cli_module.EXIT_REMOTE
+        out = json.loads(result.output)
+        assert out["status"] == "error"
+        assert out["error"]["code"] == "PUSH_ERROR"
+        assert "alias" in out["error"]["message"].lower() or "weekly-report" in out["error"]["message"]
+
+    def test_push_raw_file_alias_conflict_with_force_overwrites(self, tmp_path, monkeypatch):
+        """Alias conflict with --force must succeed and forward force=True."""
+        from edsl import FileStore
+
+        html_file = tmp_path / "report.html"
+        html_file.write_text("<html>updated</html>", encoding="utf-8")
+
+        push_calls = []
+
+        def fake_push(self, description=None, alias=None, visibility="private",
+                      expected_parrot_url=None, force=False):
+            push_calls.append({"alias": alias, "force": force})
+            return {
+                "uuid": "existing-uuid",
+                "url": "https://www.expectedparrot.com/content/existing-uuid",
+                "alias": alias,
+                "alias_url": f"https://www.expectedparrot.com/content/alice/{alias}",
+                "description": description,
+                "visibility": visibility,
+            }
+
+        monkeypatch.setattr(FileStore, "push", fake_push)
+
+        result = CliRunner().invoke(
+            cli_module.app,
+            ["push", str(html_file), "--alias", "weekly-report", "--visibility", "unlisted", "--force"],
+        )
+        assert result.exit_code == 0, result.output
+        out = json.loads(result.output)
+        assert out["status"] == "ok"
+        assert out["data"]["object_type"] == "FileStore"
+        assert push_calls == [{"alias": "weekly-report", "force": True}]
+
+    def test_push_as_filestore_treats_json_as_raw_bytes(self, tmp_path, monkeypatch):
+        """--as-filestore must treat .json as raw file bytes, not deserialize as EDSL object."""
+        from edsl import FileStore
+        from edsl.surveys import Survey
+
+        json_path = tmp_path / "survey.json"
+        survey_dict = Survey.example().to_dict()
+        json_path.write_text(json.dumps(survey_dict), encoding="utf-8")
+
+        fs_inits = []
+        push_calls = []
+        original_bytes = json_path.read_bytes()
+
+        real_init = FileStore.__init__
+
+        def recording_init(self, path=None, *args, **kwargs):
+            fs_inits.append(path)
+            real_init(self, path, *args, **kwargs)
+
+        def fake_push(self, description=None, alias=None, visibility="private",
+                      expected_parrot_url=None, force=False):
+            content = self.open().read()
+            if isinstance(content, str):
+                content = content.encode("utf-8")
+            push_calls.append({
+                "suffix": self.suffix,
+                "path": self._path,
+                "content": content,
+            })
+            return {
+                "uuid": "json-as-raw-uuid",
+                "url": "https://www.expectedparrot.com/content/json-as-raw-uuid",
+                "alias": alias,
+                "visibility": visibility,
+            }
+
+        monkeypatch.setattr(FileStore, "__init__", recording_init)
+        monkeypatch.setattr(FileStore, "push", fake_push)
+
+        result = CliRunner().invoke(
+            cli_module.app,
+            ["push", "--as-filestore", str(json_path), "--alias", "raw-json"],
+        )
+
+        assert result.exit_code == 0, result.output
+        out = json.loads(result.output)
+        assert out["data"]["object_type"] == "FileStore"
+        # FileStore was constructed (not deserialized via from_dict)
+        assert len(fs_inits) == 1
+        assert str(json_path) in str(fs_inits[0])
+        # suffix should be json (the file extension), not an EDSL class name
+        assert push_calls[0]["suffix"] == "json"
+        assert push_calls[0]["content"] == original_bytes
+
+    def test_push_raw_file_oversized_upload_error(self, tmp_path, monkeypatch):
+        """An oversized upload that the server rejects must produce an actionable PUSH_ERROR."""
+        from edsl import FileStore
+
+        big_file = tmp_path / "big.bin"
+        big_file.write_bytes(b"x" * 1024)  # Small content; server error is mocked.
+
+        def fake_push_size_error(self, description=None, alias=None, visibility="private",
+                                 expected_parrot_url=None, force=False):
+            raise RuntimeError(
+                "Server error: 413 Request Entity Too Large"
+            )
+
+        monkeypatch.setattr(FileStore, "push", fake_push_size_error)
+
+        result = CliRunner().invoke(cli_module.app, ["push", str(big_file)])
+        assert result.exit_code == cli_module.EXIT_REMOTE
+        out = json.loads(result.output)
+        assert out["status"] == "error"
+        assert out["error"]["code"] == "PUSH_ERROR"
+        # Error message must mention the actual server error, not be generic
+        assert "413" in out["error"]["message"] or "Large" in out["error"]["message"]
+        assert "too large" in out["error"].get("suggestion", "").lower()
+
 
 # ---------------------------------------------------------------------------
 # ep pull

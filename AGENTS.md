@@ -481,10 +481,17 @@ ep shared shared_object.ep
 ep share shared_object.ep --user collaborator@example.com
 ep unshare shared_object.ep --user collaborator@example.com
 ep push shared_object.ep
+ep push writeup/report.html --alias color-preference-report --description "Study report" --visibility unlisted
+ep push --as-filestore data.csv --visibility private
 ep pull shared_object.ep
 ep delete shared_object.ep --yes
 ```
 
+Raw files (HTML, PDF, PNG, CSV, DOCX, etc.) are published as `FileStore` objects.
+When pushing with `ep push`:
+- Repeated pushes without `--alias` create a new remote object each time.
+- Reusing an existing `--alias` without `--force` fails with an alias conflict error.
+- Reusing an existing `--alias` with `--force` updates (patches) the existing object associated with that alias.
 Use `delete --yes` only when explicitly requested by the user.
 
 The same commands can be reached under `ep objects`:

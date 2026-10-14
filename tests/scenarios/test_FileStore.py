@@ -182,3 +182,70 @@ class TestScenario(unittest.TestCase):
 
 if __name__ == "__main__":
     pytest.main([__file__])
+
+
+# ---------------------------------------------------------------------------
+# FileStore.push – force propagation regression test
+# ---------------------------------------------------------------------------
+
+def test_filestore_push_propagates_force_to_scenario_push(tmp_path, monkeypatch):
+    """FileStore.push(force=True) must forward force=True to Scenario.push.
+
+    This is a regression test for the bug where force was accepted by
+    FileStore.push() but silently dropped before the inner Scenario.push()
+    call, making --force inoperative for FileStore uploads.
+    """
+    from edsl.scenarios import Scenario
+
+    csv_path = tmp_path / "data.csv"
+    csv_path.write_text("a,b\n1,2\n", encoding="utf-8")
+
+    push_kwargs_received = {}
+
+    def fake_scenario_push(self, description=None, alias=None, visibility="private",
+                           expected_parrot_url=None, force=False):
+        push_kwargs_received.update({
+            "alias": alias,
+            "visibility": visibility,
+            "force": force,
+        })
+        return {
+            "uuid": "forced-uuid",
+            "url": "https://www.expectedparrot.com/content/forced-uuid",
+            "alias": alias,
+            "visibility": visibility,
+        }
+
+    monkeypatch.setattr(Scenario, "push", fake_scenario_push)
+
+    fs = FileStore(str(csv_path))
+    fs.push(alias="my-csv", visibility="unlisted", force=True)
+
+    assert push_kwargs_received["force"] is True, (
+        "force=True was not forwarded from FileStore.push to Scenario.push. "
+        f"Received: {push_kwargs_received}"
+    )
+    assert push_kwargs_received["alias"] == "my-csv"
+    assert push_kwargs_received["visibility"] == "unlisted"
+
+
+def test_filestore_push_propagates_force_false_explicitly(tmp_path, monkeypatch):
+    """FileStore.push(force=False) must explicitly forward force=False (not omit it)."""
+    from edsl.scenarios import Scenario
+
+    txt_path = tmp_path / "notes.txt"
+    txt_path.write_text("hello", encoding="utf-8")
+
+    push_kwargs_received = {}
+
+    def fake_scenario_push(self, description=None, alias=None, visibility="private",
+                           expected_parrot_url=None, force=False):
+        push_kwargs_received["force"] = force
+        return {"uuid": "uuid-false", "url": "...", "alias": alias, "visibility": visibility}
+
+    monkeypatch.setattr(Scenario, "push", fake_scenario_push)
+
+    fs = FileStore(str(txt_path))
+    fs.push(alias="my-notes", force=False)
+
+    assert push_kwargs_received["force"] is False

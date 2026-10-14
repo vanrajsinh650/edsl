@@ -118,12 +118,28 @@ def test_push_json_still_rejects_package_backed_objects(tmp_path, monkeypatch):
     assert out["error"]["code"] == "USAGE_ERROR"
 
 
-def test_push_rejects_other_files(tmp_path):
+def test_push_raw_text_file_routes_to_filestore(tmp_path, monkeypatch):
+    """A plain .txt file is now published as a FileStore, not rejected."""
+    from edsl import FileStore
+
     path = tmp_path / "notes.txt"
     path.write_text(TEXT, encoding="utf-8")
+
+    monkeypatch.setattr(
+        FileStore,
+        "push",
+        lambda self, **kwargs: {
+            "uuid": "txt-uuid",
+            "url": "https://www.expectedparrot.com/content/txt-uuid",
+            "alias": kwargs.get("alias"),
+            "visibility": kwargs.get("visibility", "private"),
+        },
+    )
+
     result, out = invoke("push", str(path))
-    assert result.exit_code != 0
-    assert out["error"]["code"] == "USAGE_ERROR"
+    assert result.exit_code == 0, result.output
+    assert out["status"] == "ok"
+    assert out["data"]["object_type"] == "FileStore"
 
 
 def test_inspect_prompt(tmp_path):

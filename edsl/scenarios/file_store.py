@@ -805,12 +805,25 @@ class FileStore(Scenario):
             print(f"Viewing of {self.suffix} files is not supported.")
 
     def extract_text(self) -> Optional[str]:
+        """Extract text from the file if supported by a format handler or as plain text.
+
+        Text extraction is best-effort during FileStore initialization (used for question
+        template interpolation). If extraction fails (e.g., corrupted structure, missing
+        optional parser dependency, or decode failure), None is returned so raw file
+        storage, serialization, and publishing can proceed unimpeded.
+        """
         handler = FileMethods.get_handler(self.suffix)
         if handler and hasattr(handler, "extract_text"):
-            return handler(self.path).extract_text()
+            try:
+                return handler(self.path).extract_text()
+            except Exception:
+                return None
 
         if not self.binary:
-            return self.text
+            try:
+                return self.text
+            except Exception:
+                return None
 
         return None
         # raise TypeError("No text method found for this file type.")
@@ -843,6 +856,7 @@ class FileStore(Scenario):
             visibility=visibility,
             expected_parrot_url=expected_parrot_url,
             alias=alias,
+            force=force,
         )
         return info
 
